@@ -3,42 +3,35 @@
 #include <WiFiClientSecure.h>
 #include <driver/adc.h>
 
-// Define Audio
-#define AUDIO_BUFFER_MAX 2205
-uint8_t audioBuffer[AUDIO_BUFFER_MAX];
-uint8_t transmitBuffer[AUDIO_BUFFER_MAX];
-uint32_t bufferPointer = 0;
-
-// Timer Interrupt Parameters
-hw_timer_t *timer = NULL;
-portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
-
 // Wifi Credentials
 const char *ssid = "Coworking-Rosales";
 const char *password = "MoniPepe_4327";
 
 // Server connection parameters
-const char *server = "192.168.1.13";
+const char *server_address = "192.168.1.13";
 const uint16_t port = 3030;
+
+// Configuración de tasa de muestreo
+const int sample_rate = 16000;                                             // Tasa de muestreo en Hz
+const int samples_per_buffer = 256;                                        // Número de muestras por buffer
+const int buffer_duration_us = 1000000 * samples_per_buffer / sample_rate; // Duración de un buffer en microsegundos
+
+volatile bool audio_buffer_flag = false;
+bool debug = true;
+
+uint8_t audio_buffer[samples_per_buffer];
+uint8_t transmit_buffer[samples_per_buffer];
+
+WiFiClient client; // Cliente de Wi-Fi
 
 // Ldo regulator pin
 const int ldoPin = 21;
 
-// Define client object
-WiFiClient client;
-
-// Boolean variables for flags
-bool transmitNow = false;
-bool debug = true;
-
 // Functions
-void IRAM_ATTR onTimer(void);
-void sendAudioData(bool transmitFlag);
 void connectWifi(void);
 void connectServer(void);
-void IRAM_ATTR onTimer();
-void sendAudioData(bool *transmitFlag);
-void Audiofilter(float input);
+float filter(float input);
+void adc_task(void *parameter);
 
 void setup()
 {
@@ -50,30 +43,69 @@ void setup()
   digitalWrite(ldoPin, HIGH);
   // Init Wifi
   connectWifi();
-  // Iniit Server connection
-  connectServer();
   // Configuring ADC Parameters
   adc1_config_width(ADC_WIDTH_BIT_13);
   adc1_config_channel_atten(ADC1_CHANNEL_2, ADC_ATTEN_DB_11); // ADC 1 channel 0 GPIO3
-  // Configuring timer interrupt
-  timer = timerBegin(0, 80, true);
-  timerAttachInterrupt(timer, &onTimer, true);
-  timerAlarmWrite(timer, 125, true);
-  timerAlarmEnable(timer);
+
+  // Crear tarea de lectura de ADC
+  xTaskCreatePinnedToCore(
+      adc_task,   // Función de la tarea
+      "adc_task", // Nombre de la tarea
+      4000,       // Tamaño de la pila de la tarea (en palabras)
+      NULL,       // Parámetros de la tarea
+      1,          // Prioridad de la tarea
+      NULL,       // Identificador de la tarea (no es necesario en este caso)
+      0           // Núcleo de la CPU en el que se ejecutará la tarea (0 o 1)
+  );
+  delay(1000); // wait for task to start
+
+  // Iniit Server connection
+  connectServer();
 }
 
 void loop()
 {
-  sendAudioData(&transmitNow);
+  // // Enviar los datos al servidor cada vez que el buffer DMA esté listo
+  // if (audio_buffer_flag)
+  // {
+  //   client.write(transmit_buffer, sizeof(transmit_buffer));
+  //   client.flush();
+  //   audio_buffer_flag = false;
+  // }
 }
 
-void sendAudioData(bool *transmitFlag)
+// Función para el hilo de lectura de ADC
+void adc_task(void *parameter)
 {
-  if (*transmitFlag)
+  while (1)
   {
-    *transmitFlag = false;
-    client.write(transmitBuffer, sizeof(transmitBuffer));
-    client.flush();
+    // Leer datos del ADC
+    for (int i = 0; i < samples_per_buffer; i++)
+    {
+
+      // Without filter
+      // audio_buffer[i] = adc1_get_raw(ADC1_CHANNEL_2) << (16 - 13);
+
+      // With filter
+       int adcVal = adc1_get_raw(ADC1_CHANNEL_2);
+       float voltage = adcVal * 3.3 / 8192.0; // convert ADC value to voltage
+       float filtered_voltage = filter(voltage);
+       uint16_t value = map(filtered_voltage * 1023.0 / 3.3, 0, 1023, 0, 1023); // mapping to 8 bits
+       audio_buffer[i] = value; // storing the value
+    }
+
+    // Indicar que el buffer DMA está listo
+    audio_buffer_flag = true;
+    //  memcpy(transmit_buffer, audio_buffer, samples_per_buffer); // transfers the buffer
+
+    if (audio_buffer_flag)
+    {
+      client.write(transmit_buffer, sizeof(transmit_buffer));
+      client.flush();
+      audio_buffer_flag = false;
+    }
+    // Esperar hasta que sea tiempo de leer de nuevo el ADC
+    vTaskDelay(buffer_duration_us / portTICK_PERIOD_MS);
   }
 }
 
@@ -95,34 +127,6 @@ float filter(float input)
   return output;
 }
 
-void IRAM_ATTR onTimer()
-{
-  portENTER_CRITICAL_ISR(&timerMux);         // to run critical code without being interrupted.
-
-  
-  int adcVal = adc1_get_raw(ADC1_CHANNEL_2); // reads the ADC value
-
-  //Without Filter
-  // uint16_t value = map(adcVal, 0, 8192, 0, 1023); // // mapping to 10 bits
-
-  //With Filter
-  float voltage = adcVal * 3.3 / 8192.0; // convert ADC value to voltage
-  float filtered_voltage = filter(voltage);
-  uint16_t value = map(filtered_voltage * 1023.0 / 3.3, 0, 1023, 0, 1023); // mapping to 8 bits
-
-  audioBuffer[bufferPointer] = value; // storing the value
-  bufferPointer++;
-
-  // Action on buffer filling
-  if (bufferPointer == AUDIO_BUFFER_MAX)
-  {
-    bufferPointer = 0;
-    memcpy(transmitBuffer, audioBuffer, AUDIO_BUFFER_MAX); // transfers the buffer
-    transmitNow = true;                                    //  flag for buffer transmission
-  }
-  portEXIT_CRITICAL_ISR(&timerMux); // priority in critical code
-}
-
 void connectWifi(void)
 {
   while (WiFi.status() != WL_CONNECTED)
@@ -142,7 +146,7 @@ void connectWifi(void)
 
 void connectServer(void)
 {
-  while (!client.connect(server, port))
+  while (!client.connect(server_address, port))
   {
     if (debug)
     {

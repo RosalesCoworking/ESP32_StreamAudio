@@ -3,35 +3,27 @@
 #include <WiFiClientSecure.h>
 #include <driver/adc.h>
 
-// Define Audio
 #define AUDIO_BUFFER_MAX 2205
 uint8_t audioBuffer[AUDIO_BUFFER_MAX];
 uint8_t transmitBuffer[AUDIO_BUFFER_MAX];
 uint32_t bufferPointer = 0;
 
-// Timer Interrupt Parameters
 hw_timer_t *timer = NULL;
 portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
 
-// Wifi Credentials
+WiFiClient client;
 const char *ssid = "Coworking-Rosales";
 const char *password = "MoniPepe_4327";
 
-// Server connection parameters
 const char *server = "192.168.1.13";
 const uint16_t port = 3030;
 
 // Ldo regulator pin
 const int ldoPin = 21;
 
-// Define client object
-WiFiClient client;
+bool transmitNow = false; //Flag for transmit audio buffer
+bool debug = true;        //Flag for debug 
 
-// Boolean variables for flags
-bool transmitNow = false;
-bool debug = true;
-
-// Functions
 void IRAM_ATTR onTimer(void);
 void sendAudioData(bool transmitFlag);
 void connectWifi(void);
@@ -42,20 +34,19 @@ void Audiofilter(float input);
 
 void setup()
 {
-  // Initialize Debug interface
   if (debug)
     Serial.begin(115200);
+
   // Turn on second LDO regulator for microphone
   pinMode(ldoPin, OUTPUT);
   digitalWrite(ldoPin, HIGH);
-  // Init Wifi
+
   connectWifi();
-  // Iniit Server connection
   connectServer();
-  // Configuring ADC Parameters
+
   adc1_config_width(ADC_WIDTH_BIT_13);
   adc1_config_channel_atten(ADC1_CHANNEL_2, ADC_ATTEN_DB_11); // ADC 1 channel 0 GPIO3
-  // Configuring timer interrupt
+  
   timer = timerBegin(0, 80, true);
   timerAttachInterrupt(timer, &onTimer, true);
   timerAlarmWrite(timer, 125, true);
@@ -102,15 +93,15 @@ void IRAM_ATTR onTimer()
   
   int adcVal = adc1_get_raw(ADC1_CHANNEL_2); // reads the ADC value
 
-  //Without Filter
+  // Without Filter
   // uint16_t value = map(adcVal, 0, 8192, 0, 1023); // // mapping to 10 bits
 
-  //With Filter
+  // With Filter
   float voltage = adcVal * 3.3 / 8192.0; // convert ADC value to voltage
   float filtered_voltage = filter(voltage);
-  uint16_t value = map(filtered_voltage * 1023.0 / 3.3, 0, 1023, 0, 1023); // mapping to 8 bits
+  uint16_t value = map(filtered_voltage * 1023.0 / 3.3, 0, 1023, 0, 1023); // mapping to 10 bits
 
-  audioBuffer[bufferPointer] = value; // storing the value
+  audioBuffer[bufferPointer] = value;
   bufferPointer++;
 
   // Action on buffer filling
@@ -118,7 +109,7 @@ void IRAM_ATTR onTimer()
   {
     bufferPointer = 0;
     memcpy(transmitBuffer, audioBuffer, AUDIO_BUFFER_MAX); // transfers the buffer
-    transmitNow = true;                                    //  flag for buffer transmission
+    transmitNow = true;                                    // flag for buffer transmission
   }
   portEXIT_CRITICAL_ISR(&timerMux); // priority in critical code
 }

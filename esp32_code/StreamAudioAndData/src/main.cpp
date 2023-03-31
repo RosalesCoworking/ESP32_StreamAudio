@@ -2,10 +2,15 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <driver/adc.h>
+#include "AACEncoderFDK.h"
 
-#define AUDIO_BUFFER_MAX 2205
-uint8_t audioBuffer[AUDIO_BUFFER_MAX];
-uint8_t transmitBuffer[AUDIO_BUFFER_MAX];
+#define AUDIO_BUFFER_MAX 8000
+
+using namespace aac_fdk;
+
+
+uint16_t audioBuffer[AUDIO_BUFFER_MAX];
+uint16_t transmitBuffer[AUDIO_BUFFER_MAX];
 uint32_t bufferPointer = 0;
 
 hw_timer_t *timer = NULL;
@@ -21,21 +26,27 @@ const uint16_t port = 3030;
 // Ldo regulator pin
 const int ldoPin = 21;
 
-bool transmitNow = false; //Flag for transmit audio buffer
-bool debug = true;        //Flag for debug 
+bool transmitNow = false; // Flag for transmit audio buffer
+bool debug = true;        // Flag for debug
 
 void IRAM_ATTR onTimer(void);
-void sendAudioData(bool transmitFlag);
 void connectWifi(void);
 void connectServer(void);
-void IRAM_ATTR onTimer();
+void dataCallback(uint8_t *aac_data, size_t len);
 void sendAudioData(bool *transmitFlag);
 void Audiofilter(float input);
+
+AACEncoderFDK aac(dataCallback);
+AudioInfo info;
 
 void setup()
 {
   if (debug)
     Serial.begin(115200);
+
+  info.channels = 1;
+  info.sample_rate = 16000;
+  aac.begin(info);
 
   // Turn on second LDO regulator for microphone
   pinMode(ldoPin, OUTPUT);
@@ -45,9 +56,9 @@ void setup()
   connectServer();
 
   adc1_config_width(ADC_WIDTH_BIT_13);
-  adc1_config_channel_atten(ADC1_CHANNEL_2, ADC_ATTEN_DB_11); // ADC 1 channel 0 GPIO3
-  
-  timer = timerBegin(0, 80, true);
+  adc1_config_channel_atten(ADC1_CHANNEL_2, ADC_ATTEN_MAX); // ADC 1 channel 0 GPIO3
+
+  timer = timerBegin(0, 40, true); // 40 Prescaler (for 16 kHz)
   timerAttachInterrupt(timer, &onTimer, true);
   timerAlarmWrite(timer, 125, true);
   timerAlarmEnable(timer);
@@ -56,15 +67,43 @@ void setup()
 void loop()
 {
   sendAudioData(&transmitNow);
+  // if (transmitNow)
+  // {
+  //   transmitNow = false;
+  //   client.write((const uint8_t *)audioBuffer, sizeof(audioBuffer));
+  //   client.flush();
+  // }
 }
 
 void sendAudioData(bool *transmitFlag)
 {
-  if (*transmitFlag)
+  if (transmitNow)
   {
-    *transmitFlag = false;
-    client.write(transmitBuffer, sizeof(transmitBuffer));
+    aac.write((uint8_t *)audioBuffer, AUDIO_BUFFER_MAX);
+  }
+  // if (*transmitFlag)
+  // {
+  //   *transmitFlag = false;
+  //   client.write((const uint8_t *)audioBuffer, sizeof(audioBuffer));
+  //   client.flush();
+  // }
+}
+
+void dataCallback(uint8_t *aac_data, size_t len)
+{
+  Serial.print("AAC generated with ");
+  Serial.print(len);
+  Serial.println(" bytes");
+
+  // Send AAC buffer over WiFi
+  if (client.connected())
+  {
+    client.write(aac_data, len);
     client.flush();
+  }
+  else
+  {
+    Serial.println("Connection lost.");
   }
 }
 
@@ -88,28 +127,26 @@ float filter(float input)
 
 void IRAM_ATTR onTimer()
 {
-  portENTER_CRITICAL_ISR(&timerMux);         // to run critical code without being interrupted.
+  portENTER_CRITICAL_ISR(&timerMux); // to run critical code without being interrupted.
 
-  
   int adcVal = adc1_get_raw(ADC1_CHANNEL_2); // reads the ADC value
 
   // Without Filter
-  // uint16_t value = map(adcVal, 0, 8192, 0, 1023); // // mapping to 10 bits
+  // uint16_t value = map(adcVal, 0, 8192, 0, 8192); // // mapping to 10 bits
 
   // With Filter
   float voltage = adcVal * 3.3 / 8192.0; // convert ADC value to voltage
   float filtered_voltage = filter(voltage);
-  uint16_t value = map(filtered_voltage * 1023.0 / 3.3, 0, 1023, 0, 1023); // mapping to 10 bits
+  uint16_t value = map(filtered_voltage * 8192.0 / 3.3, 0, 8192, 0, 8192); // mapping to 10 bits
 
-  audioBuffer[bufferPointer] = value;
-  bufferPointer++;
+  audioBuffer[bufferPointer++] = value;
 
   // Action on buffer filling
   if (bufferPointer == AUDIO_BUFFER_MAX)
   {
     bufferPointer = 0;
-    memcpy(transmitBuffer, audioBuffer, AUDIO_BUFFER_MAX); // transfers the buffer
-    transmitNow = true;                                    // flag for buffer transmission
+    // memcpy(transmitBuffer, audioBuffer, AUDIO_BUFFER_MAX); // transfers the buffer
+    transmitNow = true; // flag for buffer transmission
   }
   portEXIT_CRITICAL_ISR(&timerMux); // priority in critical code
 }

@@ -15,9 +15,9 @@ const server = net.createServer(socket => {
     socket.on('data', (data) => {
         if (!speaker) {
             speaker = new Speaker({
-                channels: 2,
+                channels: 1,
                 bitDepth: 16,
-                sampleRate: 2205
+                sampleRate: 16000
             });
         }
 
